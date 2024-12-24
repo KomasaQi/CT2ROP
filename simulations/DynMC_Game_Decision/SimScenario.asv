@@ -1,0 +1,1456 @@
+% This is a simulation scenario class for COMPASS project.
+classdef SimScenario 
+    properties(Constant)
+        var = struct('laneIdxDev',1, ...
+                       'laneDist',2, ...
+                              'x',3, ...
+                              'y',4, ...
+                            'spd',5, ...
+                            'acc',6, ...
+                        'heading',7, ...
+                         'edgeNo',8, ...
+                       'opsState',9, ... % 0:结束运行,1:在普通边内,2:在最终边内且下一个边不在地图中啦,3:在Junction内
+                 'maxLaneIdxDev',10, ...
+                           'dir',11, ... % 当前正准备进行的方向(也表示了优先级)，-1,0,1,2,3(edge末端停车，调头，左转，右转，直行)
+                       'remDist',12, ...
+                      'routeIdx',13, ... % 在route中的idx
+              'canReachNextEdge',14, ... % 当前lane是否可以到达route的下一个edge
+                  'changingLane',15, ... % 是否正在换道,-1：左换道中 0:不换道 1：右换道中
+                 'targetLaneIdx',16, ... % 目标的laneID
+                        'spdLim',17, ... % 本edge的速度限制
+                    'nextSpdLim',18, ... % 下一个edge的速度限制
+                        'devSpd',19, ... % 横向偏移的速度，单位为 车道/s
+                    'frontSpace',20, ... % 前方的距离
+                     'backSpace',21, ... % 后方的距离
+                       'spdDiff',22);    % 和期望速度的差距
+    end
+    properties(Hidden)
+        var_laneIdxDev     = 1;
+        var_laneDist       = 2;
+        var_x              = 3;
+        var_y              = 4;
+        var_spd            = 5;
+        var_acc            = 6;
+        var_heading        = 7;
+        var_edgeNo         = 8;
+        var_opsState       = 9;
+        var_maxLaneIdxDev  = 10;
+        var_dir            = 11;
+        var_remDist        = 12;
+        var_routeIdx       = 13;
+      var_canReachNextEdge = 14;
+        var_changingLane   = 15;
+        var_targetLaneIdx  = 16;
+        var_spdLim         = 17;
+        var_nextSpdLim     = 18;
+        var_devSpd         = 19;
+        var_frontSpace     = 20;
+        var_backSpace      = 21;
+        var_spdDiff        = 22;
+    end
+    properties(Dependent)
+        % 用于获得的属性
+        laneIdxDev_
+        laneDist_
+        x_
+        y_
+        spd_
+        acc_
+        heading_
+        edgeNo_
+        opsState_
+        maxLaneIdxDev_
+        dir_
+        remDist_
+        routeIdx_
+        canReachNextEdge_
+        changingLane_
+        targetLaneIdx_
+        spdLim_
+        nextSpdLim_
+        devSpd_
+        frontSpace_
+        backSpace_
+        spdDiff_
+    end
+    properties
+        % 仿真时间与步长参数
+        stateNum               % 车辆的状态数量
+        maxSimTime = 20;       % 最大仿真时间（所有阶段）
+        timeStep = 0.5;        % 场景快速仿真用时间步长
+        sectionSimTime = 2;    % 本阶段场景仿真到的时间
+        currentStep = 0;       % 所有阶段目前为止累计的仿真步数  
+        
+        % 车辆状态意图等参数
+        egoTargetLaneIdx = 0;  % 本阶段内自车的期望车道序号，默认为0
+        egoTargetSpd = 60/3.6; % 本阶段内自车的期望速度，默认为60km/h
+        vehState = [];         % 本阶段内所有车辆状态，第一个是自车
+        vehLogState = [];      % 所有阶段所有车辆状态的记录
+        vehicles = {};         % 所有车辆名义参数体，第一个是自车，不发生变化只调用
+        vehDriveLine           % 所有车前方的行驶线
+        vehNum = 0;            % 所有车数量，至少有1因为有自车
+        surroundVeh            % 存储左前 前 右前 左后 后 右后 的周围车辆No
+        surrVehDist            % 存储左前 前 右前 左后 后 右后 的周围车辆距离，都是非负的
+        surrVehSpd             % 存储左前 前 右前 左后 后 右后 的周围车速度
+        nextEdgeIDs            % 如果有下一个edge的话，就会存储nextEdgeID，对于状态2（自身末边）以及结束0为[]
+        laneIDs                % 存储所有车当前的laneID
+        edgeIDs                % 存储所有车当前的edgeID
+        junctionIDs            % 存储所有车当前的junctionID
+        
+        % 本场景的路网信息 
+        net                    % 本场景涉及到的路网信息
+       
+        % 统一的仿真参数
+        foreseeTime = 5;       % 前视时间，用于控制生成的交叉口交互用的vehDriveLine的长度
+        latAlertWidth = 0.70;  % 警惕自车周围左右latAlertWidth倍车道宽的周车
+        defaultDist = 150;     % 前后方车辆如果没有的话，的默认距离
+
+        % 横向动力学参数
+        dev_omega = 1.5;       % 横向变化的角频率ω 1.5
+        dev_zeta = 0.8;        % 横向变化的阻尼率ζ 0.8
+
+    end
+    methods
+        % 初始化场景
+        function obj = SimScenario(varargin)
+            for k = 1:2:length(varargin)
+                if isprop(obj, varargin{k})
+                    obj.(varargin{k}) = varargin{k+1};
+                else
+                    error('Property %s does not exist.', varargin{k});
+                end
+            end
+            obj.stateNum = length(fieldnames(obj.var)); % 同步一下有多少个状态量
+        end
+        
+        % 添加车辆，首先加入自车，随后加入他车
+        function obj= addVehicle(obj,vehicle4COMPASS,vehicleState)
+            obj.vehicles = [obj.vehicles;{vehicle4COMPASS}];
+            obj.vehNum = obj.vehNum + 1;
+            obj.vehState(obj.vehNum,:) = vehicleState;
+        end
+        
+        % 在添加完车辆之后进行设置，初始化存储空间，之后每次仿真都只需要修改自车意图和停止时间就可以啦
+        function obj = initSenario(obj) 
+            obj.currentStep = 1; 
+            totalStepNum = obj.maxSimTime/obj.timeStep+1;
+            obj.vehLogState = zeros(totalStepNum,obj.stateNum,obj.vehNum);
+            obj = obj.saveState();
+
+            obj.laneIDs = obj.getAllLaneIDs(); % 一定要先更新这个表格，后面才能用的
+            obj.edgeIDs = obj.getAllEdgeIDs();
+            obj.junctionIDs = obj.getAllJunctionIDs();
+
+            obj.vehState(:,obj.var_canReachNextEdge) = obj.getAllCanReachNextEdge(); 
+            obj.vehState(:,obj.var_remDist) = obj.getAllRemDist(); % 更新剩余距离
+            obj.vehState(:,obj.var_dir) = obj.getAllDirs(); % 更新所有车下一个路口/正在的方向意图
+            obj.vehDriveLine = obj.getAllVehicleLines(); % 用了canReachNextEdge,所以一定在其后更新
+            obj.nextEdgeIDs = obj.getAllNextEdgeID(); % 获取下一个edge（如果有的话，对应状态1,3）
+            [obj.vehState(:,obj.var_spdLim),obj.vehState(:,obj.var_nextSpdLim)] = obj.getAllSpdLim();
+            [obj.surroundVeh,obj.surrVehDist,obj.surrVehSpd] = getAllSurroundVeh(obj);
+            [obj.vehState(:,obj.var_frontSpace),obj.vehState(:,obj.var_backSpace)] = obj.getAllSpace();
+        end
+       
+        % 进行仿真的步进迭代
+        function obj = step(obj) 
+            % 进行一步仿真的步骤：
+            %{
+                1：找出所有车的  左前  前  右前 车的No，-1为还未检查，无车为0，虚拟车为666，无法换道则为999
+                                左后  后  右后       （全部运行一遍之后不应该有-1）
+            %}
+            theTimeStep = obj.timeStep;
+
+            vehicleState = obj.vehState; % 先继承上一个的vehState
+            spd0s = vehicleState(:,obj.var_spd);
+            acc0s = vehicleState(:,obj.var_acc);
+            remDist0s = vehicleState(:,obj.var_remDist);
+            laneDist0s = vehicleState(:,obj.var_laneDist);
+            opsState0s = vehicleState(:,obj.var_opsState);
+            laneIdxDev0s = vehicleState(:,obj.var_laneIdxDev);
+            targetLaneIdx0s = vehicleState(:,obj.var_targetLaneIdx);
+            devSpd0s = vehicleState(:,obj.var_devSpd);
+
+
+            
+            % 更新状态
+            % 仿真增加一步
+
+            spds = max(spd0s + acc0s*theTimeStep,1e-3); % spd
+            vehicleState(:,obj.var_spd) = spds;
+            opsStates = opsState0s;
+            % remDist_
+            % laneDist_
+            travelDists = spds*theTimeStep + acc0s*theTimeStep*theTimeStep/2; % 认为是匀加速
+            remDists = remDist0s - travelDists;
+            laneDists = laneDist0s + travelDists;
+            toNextEdgeVehList = find(remDists < 0);
+            for i = 1:length(toNextEdgeVehList) % 需要调节的
+                vNo = toNextEdgeVehList(i);
+                if opsState0s(vNo) % 对没有结束的车辆
+                    % 先看一下是否是快要结束的，是否有下一个edge
+                    switch opsState0s(vNo) % 如果没有下个edge了，就要结束啦
+                        case 2
+                            opsStates(vNo) = 0;
+                            laneDists(vNo) = laneDist0s(vNo) + remDist0s(vNo);
+                            remDists(vNo) = 0;
+                            % x_
+                            vehicleState(vNo,obj.var_x) = 0; % 状态归零
+                            % y_
+                            vehicleState(vNo,obj.var_y) = 0;
+                            % heading_
+                            vehicleState(vNo,obj.var_heading) = 0;
+                            % disp(['车辆 No.' num2str(vNo) ' 结束行驶！'])
+
+                        case {1,3}
+                                
+                            laneDists(vNo) = -remDists(vNo);
+                            if opsState0s(vNo) == 3 % 在交叉口内部
+                                % routeIdx_
+                                routeIdx = vehicleState(vNo,obj.var_routeIdx) + 1;
+                                % edgeNo_
+                                edgeID = obj.vehicles{vNo}.route{routeIdx};
+                            else % 在正常边行驶，且有下一个edge
+                                % routeIdx_
+                                routeIdx = vehicleState(vNo,obj.var_routeIdx); % routeIdx不变
+                                currentEdgeID = obj.edgeIDs{vNo};
+                                nextRouteEdgeID = obj.vehicles{vNo}.route{routeIdx+1};
+                                connections = obj.net.c_from_dict{currentEdgeID}.connections;
+                                for j = 1:obj.net.c_from_dict{currentEdgeID}.connection_num
+                                    if strcmp(connections{j}.to,nextRouteEdgeID)
+                                        viaLaneID = connections{j}.via;
+                                        nextEdgeID = regexprep(viaLaneID, '_\d+$', '');
+                                        break
+                                    end
+                                end
+                                edgeID = nextEdgeID;
+                            end
+                            % obj.edgeIDs{vNo} = edgeID;
+                            edgeNo = obj.net.edge_No_dict(edgeID);
+                            remDists(vNo) = obj.net.e_dict{[edgeID '_0']}.length - laneDists(vNo);
+                            % maxLaneIdxDev_
+                            maxLaneIdxDev = obj.net.e_dict{edgeID}.laneNum - 0.5;
+    
+                            vehicleState(vNo,obj.var_routeIdx) = routeIdx;
+                            vehicleState(vNo,obj.var_edgeNo) = edgeNo;
+                            vehicleState(vNo,obj.var_maxLaneIdxDev) = maxLaneIdxDev;
+                            % dir_
+                            routeNum = obj.vehicles{vNo}.routeNum;
+                            if routeIdx < routeNum % 如果没有后续啦，认为车将在本edge末停车,否则↓%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%可以认真修改的地方
+                                % 如果是在交叉口内，说明一定还有下一个edge
+                                % 在正常边内，并不是要结束了，还有下一个边
+                                nextEdgeID = obj.vehicles{vNo}.route{routeIdx+1}; % 获取route中的下一个edge
+                                dir_str = obj.net.getDirE2E(edgeID,nextEdgeID);
+                                switch dir_str
+                                    case 's'
+                                        dir = 3;
+                                    case 'r'
+                                        dir = 2;
+                                    case 'l'
+                                        dir = 1;
+                                    case 't'
+                                        dir = 0;
+                                    otherwise
+                                        dir = -1; % 先用-1 初始化
+                                end
+                            end
+                            vehicleState(vNo,obj.var_dir) = dir;
+    
+                            % opsState
+                            isInFinalEdge = obj.net.frindgeEdgeArray(edgeNo);
+                            isInEndEdge = (routeIdx >= routeNum); % 看下是不是到估计的路线的最终边啦
+                            if ~isInEndEdge
+                                % 如果不是，再看看下一条边是不是在本场景的路网外部
+                                isNextEdgeOutRange = ~obj.net.isInNet_fast(obj.vehicles{vNo}.route{routeIdx+1});
+                            end
+                            if strncmp(edgeID,':',1)
+                                opsState = 3;
+                            elseif isInEndEdge || (isInFinalEdge && isNextEdgeOutRange) 
+                                % 2 的含义就是，要么在这辆车自己的结束，要么因为路网裁剪的原因被迫结束
+                                opsState = 2;
+                            else 
+                                opsState = 1;
+                            end
+                            opsStates(vNo) = opsState;
+                            
+
+
+
+                            % targetLaneIdx_
+                            targetLaneID0 = [obj.edgeIDs{vNo} '_' char('0'+targetLaneIdx0s(vNo))];
+
+                            if opsState0s(vNo) == 3
+                                % 那么当前的routeIdx对应的是已经行驶过的边，且一定存在下一个正常边
+                                % 且对于轿车口内的车道来说，可以到达的下一个车道是唯一的
+                                targetLaneID = obj.net.lc_from_dict{targetLaneID0}{1}.to;
+                            else % 也没有马上结束，那么就是还有下一个边，以及下一个边的中间边
+                                % 需要找到从本车道到下一个edge可能的lane连接，并选取其中最近的lane作为目标lane
+                                line1 = obj.net.e_dict{targetLaneID0}.shape;
+                                dist_min = inf;
+                                idx = 0;
+                                for j = 1:length(obj.net.lc_from_dict{targetLaneID0})
+                                    toLaneID_temp = obj.net.lc_from_dict{targetLaneID0}{j}.to;
+                                    toEdgeID_temp = regexprep(toLaneID_temp, '_\d+$', '');
+                                    nextEdgeID = obj.getNextRouteEdgeID(vNo);
+                                    if strcmp(toEdgeID_temp,nextEdgeID) % 需要保证这个连接的下一个edge是route中的下一个edge
+                                        lanePos = obj.net.e_dict{toLaneID_temp}.shape(1,:);
+                                        dist_xy = norm(lanePos - line1(end,:));
+                                        if dist_xy < dist_min
+                                            idx = j;
+                                        end
+                                    end
+                                end
+                                if ~idx
+                                    error(['vNo:' num2str(vNo) '无法找到与route中下一个目标edge内lane的连接,currentlaneID=' targetLaneID0]);
+                                end
+                                targetLaneID = obj.net.lc_from_dict{targetLaneID0}{idx}.via;
+                            end
+                            lastUnderscoreIdx = find(targetLaneID=='_',1,'last');
+                            targetLaneIdx = str2double(targetLaneID(lastUnderscoreIdx+1:end));
+                            vehicleState(vNo,obj.var_targetLaneIdx) = targetLaneIdx;
+
+                            inc_targetLaneIdx = targetLaneIdx - targetLaneIdx0s(vNo);
+                            laneIdxDev0s(vNo) = laneIdxDev0s(vNo) + inc_targetLaneIdx; % 经过转换到新的lane之后的laneIdxDev
+                            devSpd0s(vNo) = devSpd0s(vNo) + inc_targetLaneIdx*2*obj.dev_zeta*obj.dev_omega;
+
+                    end
+                end
+            end
+
+            vehicleState(:,obj.var_remDist) = remDists;
+            vehicleState(:,obj.var_laneDist) = laneDists;
+            vehicleState(:,obj.var_opsState) = opsStates;
+            targetLaneIdxs = vehicleState(:,obj.var_targetLaneIdx);
+            
+            
+            % laneIdxDev_
+            devSpds = devSpd0s + theTimeStep*(targetLaneIdxs - laneIdxDev0s)*(obj.dev_omega^2);
+            laneIdxDevs = laneIdxDev0s + theTimeStep*(devSpd0s - 2*obj.dev_zeta*obj.dev_omega*laneIdxDev0s);
+            vehicleState(:,obj.var_devSpd) = devSpds;
+            vehicleState(:,obj.var_laneIdxDev) = laneIdxDevs;
+            
+            % x0s = obj.x_;
+            % y0s = obj.y_;
+            % heading0s = obj.heading_;
+
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo) % 只要车辆没结束
+                    % x_
+                    % y_
+                    % heading_
+                    edgeNo = vehicleState(vNo,obj.var_edgeNo);
+                    edgeID = obj.net.edgeList{edgeNo};
+                    line = obj.net.e_dict{[edgeID '_0']}.shape;
+                    [x, y] = calcVehPos_onLine_mex(line, laneDists(vNo), laneIdxDevs(vNo)*3.2);
+                    
+                    vehicleState(vNo,obj.var_x) = x;
+                    vehicleState(vNo,obj.var_y) = y;
+                end
+
+            end
+            
+
+            obj.vehState = vehicleState;
+
+            obj.laneIDs = obj.getAllLaneIDs(); % 一定要先更新这个表格，后面才能用的
+            obj.edgeIDs = obj.getAllEdgeIDs();
+            obj.junctionIDs = obj.getAllJunctionIDs();
+
+            obj.vehState(:,obj.var_canReachNextEdge) = obj.getAllCanReachNextEdge(); 
+            obj.vehDriveLine = obj.getAllVehicleLines(); % 用了canReachNextEdge,所以一定在其后更新
+            obj.nextEdgeIDs = obj.getAllNextEdgeID(); % 获取下一个edge（如果有的话，对应状态1,3）
+            [obj.vehState(:,obj.var_spdLim),obj.vehState(:,obj.var_nextSpdLim)] = obj.getAllSpdLim();
+
+
+
+            [obj.surroundVeh,obj.surrVehDist,obj.surrVehSpd] = getAllSurroundVeh(obj);
+            [obj.vehState(:,obj.var_frontSpace),obj.vehState(:,obj.var_backSpace)] = obj.getAllSpace();
+
+            %%%% 假设换道决策是没问题的，继续往后写利用仿真结果进行验证
+            [changingLanes,targetLaneIdxs,accs] = obj.globalMOBIL(); % 获取所有车的换道决策
+            obj.vehState(:,obj.var_changingLane) = changingLanes;
+            obj.vehState(:,obj.var_targetLaneIdx) = targetLaneIdxs;
+            obj.vehState(:,obj.var_acc) = accs;
+            
+
+            obj.currentStep = obj.currentStep + 1; 
+            obj = obj.saveState(); % 所有阶段所有车辆状态的记录
+    
+        end
+        
+        
+
+        % 用全局MOBIL得到所有车的换道决策
+        %{
+        MOBIL模型 Kesting等人于2007年提出（最小化由换道行为引发的总体减速模型）
+        minimizing overall braking induced by lane changes
+        该模型用车辆加速度值表征驾驶者所得的驾驶利益，通过比较换道实施前后，当前车道与目标
+        车道上受影响车辆的整体利益变化来判断是否进行换道，并针对对称和非对称换道规则其除了相应的
+        换道模型。
+        MOBIL考察3辆车利益，本车，原车道后车，目标车道的新后车。换道需求建模：加速度
+        驾驶人对车道的选择本质上是看其在那条车道上能获得最大加速度。
+        另车辆ego选择第k条车道的效用值为U_ego_k,则有U_ego_k = a_ego_k
+         
+        换道安全准则
+        目标车道后车加速度约束：间隙约束的间接描述
+        _hat表示换道后的值
+        
+        (a_ego_hat - a_ego) + p*((a_hat_fhat - a_fhat)+(a_hat_f - a_f)) > delta_a + a_bias
+        
+        p为礼让系数，p=0时只考虑自身利益，p=1时平等考虑自身和他人利益
+        detla_a为一个阈值，a_bias反应不对称换道情况。当交通规则倾向于驾驶人靠右侧车道行驶时
+        从左侧车道向右侧换道的门槛较低a_bias<0,反之a_bias>0。当左右换道具有同等权利时，a_bias=0
+        
+        对于换道后新的跟随车辆，换道行为需要满足如下安全条件：
+        a_hat_fhat = f(v_fhat,v_ego,s_hat_fhat) > -b_safe
+        其中f是跟驰模型
+        %}
+        function [changingLanes, targetLaneIdxs,accs] = globalMOBIL(obj)
+            vehicleState = obj.vehState;
+            changingLanes = vehicleState(:,obj.var_changingLane); % 继承之前的状态
+            targetLaneIdxs = vehicleState(:,obj.var_targetLaneIdx); % 继承继承！
+            laneIdxDevs = vehicleState(:,obj.var_laneIdxDev);
+            opsStates = vehicleState(:,obj.var_opsState);
+            noLC_accs = zeros(obj.vehNum,1); % 用0初始化
+            spds = vehicleState(:,obj.var_spd);
+            canReachNextEdges = obj.vehState(:,obj.var_canReachNextEdge);
+            dirs = vehicleState(:,obj.var_dir);
+            remDists = vehicleState(:,obj.var_remDist);
+
+            spdDesList = obj.getAllSpdDes(); % 获取所有车的期望速度
+            
+            accs = zeros(obj.vehNum,1); % 加速度
+            surroundVehMat0 = obj.surroundVeh;
+            surrVehDistMat0 = obj.surrVehDist;
+            surrVehSpdMat0 = obj.surrVehSpd;
+
+            biases = zeros(obj.vehNum,3); % 换道的偏置系数，对每辆车的都是[L K R]
+            biases(:,2) = 3; % 参数，车道保持的偏置系数
+            utilities = zeros(obj.vehNum,3); % 换道加速度收益
+
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo)  % 如果该车没有结束
+                    % front_veh_No = surroundVehList_mat(bidx,2); % 前车序号
+                    front_veh_Spd = surrVehSpdMat0(2*vNo-1,2); % 前车速度
+                    front_veh_dist = surrVehDistMat0(2*vNo-1,2); % 前车距离
+                    % 首先对所有车辆进行一次不换道时的加速度计算与存储
+                    noLC_accs(vNo) = obj.vehicles{vNo}.idm(spds(vNo),front_veh_Spd,front_veh_dist,spdDesList(vNo));
+                end
+            end
+            
+            % 下面对每辆车进行MOBIL,第一步，是计算
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo)  % 如果该车没有结束
+                    
+                    % 最开始先判断一下是不是当前无法换道
+                    left_front_veh_No = surroundVehMat0(2*vNo-1,1);
+                    right_front_veh_No = surroundVehMat0(2*vNo-1,3);
+                    can_LLC = left_front_veh_No ~= 999;
+                    can_RLC = right_front_veh_No ~= 999;
+                    
+                    
+                    % 顺便设置一下偏置系数
+                    if canReachNextEdges(vNo) % 如果本车道能到下一个edge，就不倾向于换道
+                        biases(vNo,2) = biases(vNo,2) + 2; % 同样，这个参数需要调节
+                    else % 如果本车道到不了下一个edge，就根据意图来判断
+                        switch dirs(vNo)
+                            case {-1,2} % 停车，右转
+                                biases(vNo,1) = biases(vNo,1) + 1/remDists(vNo) - 3;
+                                biases(vNo,3) = biases(vNo,3) + 1/remDists(vNo) + 3;
+                            case {0, 1} % 调头，左转
+                                biases(vNo,1) = biases(vNo,1) + 1/remDists(vNo) + 3;
+                                biases(vNo,3) = biases(vNo,3) + 1/remDists(vNo) - 3;
+                            case 3 % 直行
+                                if laneIdxDevs(vNo) < 1 
+                                    biases(vNo,1) = biases(vNo,1) + 1/remDists(vNo) + 3;
+                                    biases(vNo,3) = biases(vNo,3) + 1/remDists(vNo) - 3;
+                                else
+                                    biases(vNo,1) = biases(vNo,1) + 1/remDists(vNo) - 3;
+                                    biases(vNo,3) = biases(vNo,3) + 1/remDists(vNo) + 3;
+                                end
+                        end
+                    end
+
+
+
+
+                    politeness = obj.vehicles{vNo}.politenss; % 礼貌系数
+                    % front_veh_No = surroundVehList_mat(bidx,2); % 前车序号
+                    if changingLanes(vNo) % 如果这辆车现在正处在换道的情况之中，需要判断当前情况是否危险，是否要撤销换道,以及是否结束换道了
+                        % 正在换道，说明targetLaneIdx和round(laneIdxDev不相同)
+                        if abs(laneIdxDevs(vNo) - targetLaneIdxs(vNo)) < 0.3 % 这个地方可以纠结一下数值，判断是否完成了一次换道
+                            changingLanes(vNo) = 0;
+                        else
+                            switch changingLanes(vNo) % 查看是否要切换成0 
+                                case 1 % 正在向左换道
+                                    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 暂时这里没写，应该写撤销换道的内容
+    
+                                case -1 % 正在向右换道
+                                    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 暂时这里没写，应该写撤销换道的内容
+                                otherwise
+                                    error(['车No.' num2str(vNo) '的changingLane状态是' num2str(changingLanes(vNo)) '，是未知状态！'])
+                            end
+                        end
+                        
+                    else % 如果这辆车现在没有在换道，就需要判断：首先，当前是否可以换道
+                        u_f = -999; % 初始化
+                        if ~can_LLC % 如果不能向左换道
+                            utilities(vNo,1) = -inf;
+                        else % 计算向左换道的收益
+                            % (a_ego_hat - a_ego) + p*((a_hat_fhat - a_fhat)+(a_hat_f - a_f)) > delta_a + a_bias
+                            a_ego = noLC_accs(vNo);
+                            a_ego_hat = obj.vehicles{vNo}.idm(spds(vNo),surrVehSpdMat0(2*vNo-1,1),surrVehDistMat0(2*vNo-1,1),spdDesList(vNo));
+                            u_ego = a_ego_hat - a_ego;
+                            veh_f_No = surroundVehMat0(2*vNo,2);
+                            if veh_f_No % 如果存在后车
+                                a_f = noLC_accs(veh_f_No);
+                                a_hat_f = obj.vehicles{veh_f_No}.idm(spds(veh_f_No),surrVehSpdMat0(2*vNo-1,2), ...
+                                    surrVehDistMat0(2*vNo,2)+surrVehDistMat0(2*vNo-1,2),spdDesList(veh_f_No));
+                                u_f = a_hat_f - a_f;
+                            else
+                                u_f = 0;
+                            end
+                            veh_hatf_No = surroundVehMat0(2*vNo,1);
+                            if veh_hatf_No
+                                a_hatf = noLC_accs(veh_hatf_No);
+                                a_hat_hatf = obj.vehicles{veh_hatf_No}.idm(spds(veh_hatf_No),spds(vNo), ...
+                                    surrVehDistMat0(2*vNo,1),spdDesList(veh_hatf_No));
+                                u_hatf = a_hat_hatf - a_hatf;
+                            else
+                                u_hatf = 0;
+                            end
+                            utilities(vNo,1) = u_ego + politeness*(u_hatf + u_f);
+                        end
+
+                        if ~can_RLC % 如果不能向右换道
+                            utilities(vNo,3) = -inf;
+                        else % 计算向右换道的收益
+                            % (a_ego_hat - a_ego) + p*((a_hat_fhat - a_fhat)+(a_hat_f - a_f)) > delta_a + a_bias
+                            a_ego = noLC_accs(vNo);
+                            a_ego_hat = obj.vehicles{vNo}.idm(spds(vNo),surrVehSpdMat0(2*vNo-1,3),surrVehDistMat0(2*vNo-1,3),spdDesList(vNo));
+                            u_ego = a_ego_hat - a_ego;
+                            veh_f_No = surroundVehMat0(2*vNo,2);
+                            if u_f ~= -999 % 如果计算过一遍，就不要再计算啦
+                                if veh_f_No % 如果存在后车
+                                    a_f = noLC_accs(veh_f_No);
+                                    a_hat_f = obj.vehicles{veh_f_No}.idm(spds(veh_f_No),surrVehSpdMat0(2*vNo-1,2), ...
+                                        surrVehDistMat0(2*vNo,2)+surrVehDistMat0(2*vNo-1,2),spdDesList(veh_f_No));
+                                    u_f = a_hat_f - a_f;
+                                else
+                                    u_f = 0;
+                                end
+                            end
+                            veh_hatf_No = surroundVehMat0(2*vNo,3);
+                            if veh_hatf_No
+                                a_hatf = noLC_accs(veh_hatf_No);
+                                a_hat_hatf = obj.vehicles{veh_hatf_No}.idm(spds(veh_hatf_No),spds(vNo), ...
+                                    surrVehDistMat0(2*vNo,3),spdDesList(veh_hatf_No));
+                                u_hatf = a_hat_hatf - a_hatf;
+                            else
+                                u_hatf = 0;
+                            end
+                            utilities(vNo,3) = u_ego + politeness*(u_hatf + u_f);
+                        end
+                        changingLanes(vNo) = obj.getLCDecision(utilities(vNo,:)+biases(vNo,:));
+                        targetLaneIdxs(vNo) = round(laneIdxDevs(vNo)) + changingLanes(vNo);
+                    end
+                    accs(vNo) = noLC_accs(vNo);
+                end
+            end
+
+        end
+        
+        function LCDecision = getLCDecision(~,baised_utilities) % 根据收益获取换道决策baised_utilities = [pL,pK,pR]
+            [~,idx] = max(baised_utilities);
+            LCDecision = 2 - idx;
+
+        end
+        
+
+
+        % 获取所有车的期望车速(最高限速)
+        function spdDesList = getAllSpdDes(obj) % 需要提前更新好remDist
+            spdDesList = zeros(obj.vehNum,1);
+            remDists = obj.vehState(:,obj.var_remDist);
+            spdLims = obj.vehState(:,obj.var_spdLim);
+            nextSpdLims = obj.vehState(:,obj.var_nextSpdLim);
+            for vNo = 1:obj.vehNum
+                spdLim = spdLims(vNo);
+                nextSpdLim = nextSpdLims(vNo);
+                if spdLim <= nextSpdLim % 如果当前车道限速较低，就继续按照这个跑
+                    spdDesList(vNo) = spdLim;
+                else % 如果当前车道限速较高，就按照本车的舒适减速度来计算，看期望车速是多少
+                    b_comf = obj.vehicles{vNo}.b_comf;
+                    s_realm = abs(spdLim*spdLim - nextSpdLim*nextSpdLim)/(2*b_comf);
+                    if remDists(vNo) > s_realm % 还没有到影响范围内，也就是交叉口减速区
+                        spdDesList(vNo) = spdLim;
+                    else
+                        spdDesList(vNo) = sqrt(2*remDists(vNo)*b_comf + nextSpdLim*nextSpdLim);
+                    end
+
+                end
+            end
+        end
+
+
+        % 一次性获取所有的当前edge速度限制和下一个edge的速度限制
+        function [spdLims,nextSpdLims] = getAllSpdLim(obj) % 需要事先初始化好dirs，nextEdgeIDs
+            spdLims = zeros(obj.vehNum,1);
+            nextSpdLims = spdLims;
+            opsStates = obj.opsState_;
+            dirs = obj.dir_;
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo) % 如果车辆还没结束，就更新一下
+                    spdLims(vNo) = obj.net.e_dict{obj.laneIDs{vNo}}.speed;
+                    nextEdgeID = obj.nextEdgeIDs{vNo};
+                    if isempty(nextEdgeID) || ~obj.net.isInNet_fast(nextEdgeID)
+                        switch dirs(vNo)
+                            case -1 % edge末停车
+                                nextSpdLims(vNo) = 0;
+                            case  0 % 调头
+                                nextSpdLims(vNo) = 5/3.6;
+                            case  1 % 左转
+                                nextSpdLims(vNo) = 30/3.6;
+                            case  2 % 右转
+                                nextSpdLims(vNo) = 30/3.6;
+                            case  3 % 直行
+                                nextSpdLims(vNo) = spdLims(vNo);
+                            otherwise
+                                nextSpdLims(vNo) = 0;
+                        end
+                    else
+                        nextSpdLims(vNo) = obj.net.e_dict{[nextEdgeID '_0']}.speed;
+                    end
+                end
+            end
+        
+        end
+        
+        % #############################################################################################################
+        %                                              查找周车
+        % #############################################################################################################
+        % 查找每一辆车的周车并更新列表
+        function [surroundVehMat,surrVehDistMat,surrVehSpdMat] = getAllSurroundVeh(obj)
+      
+            vehNumber = obj.vehNum;
+            dftDist = obj.defaultDist; % 默认150 米的距离
+            states = obj.vehState;
+            surroundVehMat = -ones(2*vehNumber,3);
+            surrVehDistMat = dftDist*ones(2*vehNumber,3);
+            surrVehSpdMat = -ones(2*vehNumber,3);
+            % 预先切片来加速
+            laneIdxDevs = states(:,obj.var_laneIdxDev);
+            laneDists = states(:,obj.var_laneDist);
+            xs = states(:,obj.var_x);
+            ys = states(:,obj.var_y);
+            spds = states(:,obj.var_spd);
+            edgeNos = states(:,obj.var_edgeNo);
+            dirs = states(:,obj.var_dir);
+            remDists = states(:,obj.var_remDist);
+            opsStates = states(:,obj.var_opsState);
+            spdLims = states(:,obj.var_spdLim);
+            maxLaneIdxDevs = states(:,obj.var_maxLaneIdxDev);
+            canReachNextEdges = states(:,obj.var_canReachNextEdge);
+            % 获取车辆的laneNo
+            laneNos = max(min([round(laneIdxDevs),round(maxLaneIdxDevs-0.5)],[],2),0);
+            % 是否靠近交叉口的标准：要么同时距离交叉口很近，要么身在交叉口当中
+            nearJunctions = (remDists < 50) | (opsStates == 3); 
+
+            % 靠近交叉路口而无法换道，也是将虚拟车设置在相应位置
+            nearJunctionCanNotLCs = (remDists < 10) | (opsStates == 3); 
+
+            latWidth = obj.latAlertWidth;
+            %{
+                1：找出所有车的  左前  前  右前 车的No，-1为还未检查，无车为0，虚拟车为666，无法换道则为999
+                                左后  后  右后       （全部运行一遍之后不应该有-1）
+            %}
+            edgeIDs_hier = obj.edgeIDs;
+            junctionIDs_hier = obj.junctionIDs;
+            for vNo = 1:vehNumber % 对每辆车寻找周车
+                opsState = opsStates(vNo);
+                if opsState % 如果没有终止
+                    bidx = 2*(vNo-1)+1;
+                    currentEdgeID = edgeIDs_hier{vNo};
+                    currentJunctionID = junctionIDs_hier{vNo};
+                    dir = dirs(vNo);
+                    edgeNo = edgeNos(vNo);
+                    remDist = remDists(vNo);
+                    nearJunction = nearJunctions(vNo);
+                    nearJunctionCanNotLC = nearJunctionCanNotLCs(vNo);
+                    laneIdxDev = laneIdxDevs(vNo);
+                    laneNo = laneNos(vNo);
+                    sameEdgeLogical = edgeNos == edgeNo;
+                    inLaneIdxDevs = laneIdxDevs >= (laneIdxDev - latWidth) & laneIdxDevs <= (laneIdxDev + latWidth); 
+                    sameEdge_inLaneIdxDevs = sameEdgeLogical & inLaneIdxDevs;
+                    notStoped = opsStates~=0;
+                    toFindList = sameEdge_inLaneIdxDevs & notStoped;
+                    sameLaneList = find(toFindList); % 这里是本条车道的所有车未停止的车
+                    % #################################寻找前车######################################################
+                    % (1)寻找前车,兼顾着在前面寻找本lane内的后车
+
+                    % 唯独前车不会被其他车的流程检查出来过，一定会走一遍这个流程
+                    front_veh_No = 0;
+                    front_veh_dist = dftDist; % 默认距离
+                    front_veh_spd = 0;
+                    sameJunctionList = [];
+                    % 不管哪种情况，都是先检查本条edge内正常的车
+                    for i = 1:length(sameLaneList)
+                        otherVNo = sameLaneList(i);
+                        if otherVNo ~= vNo % 如果不是被探查的这辆车
+                            fv_dist = laneDists(otherVNo) - laneDists(vNo);
+                            if fv_dist > 0 % 说明这辆车在前面
+                                if fv_dist <= front_veh_dist
+                                    front_veh_dist = fv_dist;
+                                    front_veh_No = otherVNo;
+                                    front_veh_spd = spds(otherVNo);
+                                end
+                            end
+                        end
+                    end
+
+                    if front_veh_No % 如果是同一个lane的前车，那么对其来说我就是后车没得跑
+                        surroundVehMat(front_veh_No*2,2) = vNo;
+                        surrVehDistMat(front_veh_No*2,2) = front_veh_dist;
+                        surrVehSpdMat(front_veh_No*2,2) = spds(vNo);
+                    end
+
+                    switch opsState % 对应1 2 3
+                        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                        case 1 % 在正常边内，需要看是否距离交叉口足够近,比如<50m
+                            
+                            if ~front_veh_No  % 如果本lane内没找到前车
+                                if  ~canReachNextEdges(vNo)  % 如果到不了下一个边，就设置虚拟车
+                                        front_veh_dist = remDist-10; % 比停止线更靠前
+                                        front_veh_No = 666; % 虚拟车号码
+                                        % front_veh_spd = 0; % 直接默认啦，不用再赋值
+
+                                elseif nearJunction % 如果也没有虚拟车，如果本edge剩余距离小于定值，就检查下一个edge:交叉口内部edge
+                                    % 先找出在同一个交叉口内部，同样都是nearJunction的车车
+                                    checkList = find(opsStates & nearJunctions); % 在交叉口附近的车
+                                    if length(checkList) == 1 % 只有当前车
+                                        sameJunctionList = []; % 就没有交叉路口内的交互车啦
+                                    else
+                                        sameJunctionList = checkList;
+                                        valid_count = 0;
+                                        for i = 1:length(checkList)
+                                            otherVNo = checkList(i);
+                                            if (otherVNo ~= vNo) && strcmp(obj.junctionIDs{otherVNo},currentJunctionID)
+                                                % 如果不是自己,且是在同一路口
+                                                valid_count = valid_count + 1;
+                                                sameJunctionList(valid_count) = otherVNo;
+                                            end
+                                        end
+                                        sameJunctionList(valid_count+1:end) = [];
+                                    end
+
+                                end
+                            end
+                       %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                        case 2 % 对其来说快要结束的边内，只需要考虑本edge内的车辆就好
+                            % 所以不需要多写什么啦
+                        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%    
+                        case 3 % 如果在交叉口内部，就需要考虑
+                            % 先检查本条edge内正常的车（检查过啦！）
+                            % 靠交互检查
+                            if front_veh_No  % 如果本lane内找到了前车，对其来说我确实是后车，不过我还可能通过交互找到更新的前车
+                                % 先找出在同一个交叉口内部，nearJunction的车车
+                                checkList = find(opsStates & nearJunctions); % 在交叉口附近的车
+                                if length(checkList) == 2 % 只有当前车和本edge内的前车%%%%%
+                                    sameJunctionList = []; % 就没有交叉路口内的交互车啦
+                                else
+                                    sameJunctionList = checkList;
+                                    valid_count = 0;
+                                    for i = 1:length(checkList)
+                                        otherVNo = checkList(i);
+                                        
+                                        if (otherVNo ~= vNo)&& (otherVNo ~= front_veh_No) && strcmp(obj.junctionIDs{otherVNo},currentJunctionID)
+                                            % 如果不是自己或者已经探明的前车,且是在同一路口
+                                            valid_count = valid_count + 1;
+                                            sameJunctionList(valid_count) = otherVNo;
+                                        end
+                                    end
+                                    sameJunctionList(valid_count+1:end) = [];
+                                end
+                            else 
+                                % 先找出在同一个交叉口内部，nearJunction的车车
+                                checkList = find(opsStates & nearJunctions); % 在交叉口附近的车
+                                if length(checkList) == 1 % 只有当前车
+                                    sameJunctionList = []; % 就没有交叉路口内的交互车啦
+                                else
+                                    sameJunctionList = checkList;
+                                    valid_count = 0;
+                                    for i = 1:length(checkList)
+                                        otherVNo = checkList(i);
+                                        
+                                        if (otherVNo ~= vNo) && strcmp(obj.junctionIDs{otherVNo},currentJunctionID)
+                                            % 如果不是自己,且是在同一路口
+                                            valid_count = valid_count + 1;
+                                            sameJunctionList(valid_count) = otherVNo;
+                                        end
+                                    end
+                                    sameJunctionList(valid_count+1:end) = [];
+                                end
+                            end
+
+    
+                    end
+
+                    % 找到相关车了，开始交互啦------------------------------------------------
+                     % 如果我是直行车，有最高通行权，那我只需要考虑比较近的车
+                    if ~isempty(sameJunctionList) % 如果存在周车
+                        for i = 1:length(sameJunctionList) % 对每个筛选出来的周车进行检查
+                            otherVNo = sameJunctionList(i);
+                            [isIntersect, ~, v_dist, ov_dist] = findIntersection_mex(obj.vehDriveLine{vNo}, obj.vehDriveLine{otherVNo});
+                            if isIntersect && v_dist < front_veh_dist % 如果我的轨迹和这辆车的轨迹相交,且比原有前车更近（或者比默认值更近）
+                                v_timeHeadWay = v_dist / spds(vNo);
+                                ov_timeHeadWay = ov_dist / spds(otherVNo);
+                                if abs(v_timeHeadWay - ov_timeHeadWay) < 2 %如果小于2s的时距，否则互相不交互
+                                    if dir > dirs(otherVNo) % 本车拥有更高通行权,就只考虑闯入本车行驶范围内的低通行权车
+                                        [~, dev, lineDist, ~] = projPoint2Polyline_mex(obj.vehDriveLine{vNo},[xs(otherVNo),ys(otherVNo)]);
+                                        if dev < 3.5 && lineDist < front_veh_dist  % 小于车道
+                                            front_veh_No = otherVNo;
+                                            front_veh_dist = lineDist;
+                                            front_veh_spd = spds(otherVNo);
+                                        end
+                                    elseif dir == dirs(otherVNo) % 两车通行权相同，用politeess决胜负
+                                        if obj.vehicles{vNo}.politenss > obj.vehicles{otherVNo}.politenss % 我更礼貌
+                                            front_veh_dist = v_dist;
+                                            front_veh_No = otherVNo; 
+                                            front_veh_spd = spds(otherVNo);
+                                        end
+                                    else % 本车通行权低，应该让行
+                                        front_veh_dist = v_dist;
+                                        front_veh_No = otherVNo; 
+                                        front_veh_spd = spds(otherVNo);
+                                    end
+                                end
+                            end
+                        end
+                    end %---------------------------------------------------------------------
+
+                    
+                    surroundVehMat(bidx,2) = front_veh_No; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                    surrVehDistMat(bidx,2) = front_veh_dist;
+                    if front_veh_No
+                        surrVehSpdMat(bidx,2) = front_veh_spd;
+                    else
+                        surrVehSpdMat(bidx,2) = spdLims(vNo);
+                    end
+
+                    %#######################################################################################
+                    % (4)寻找后车
+                    backVehNo = surroundVehMat(bidx+1,2);
+                    if backVehNo < 0 % 如果没有被其他流程检查出来过
+                        surroundVehMat(bidx+1,2) = 0; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                        % surrVehDistList_mat(bidx+1,2) = front_veh_dist;
+                        surrVehSpdMat(bidx+1,2) = 0;
+                    end
+
+                    %#######################################################################################
+                    
+                    % 首先判断一下左边是否可以换道
+                    if round(laneIdxDev) >= round(maxLaneIdxDevs(vNo)-0.5) || nearJunctionCanNotLC % 超出了左边的界限，无法再向左换道
+                        surroundVehMat(bidx,1) = 999; % 无法换道
+                        surrVehDistMat(bidx,1) = 1; % 给一个小值
+                        surrVehSpdMat(bidx,1) = 0;
+                        surroundVehMat(bidx+1,1) = 999; % 无法换道
+                        surrVehDistMat(bidx+1,1) = 1; % 给一个小值
+                        surrVehSpdMat(bidx+1,1) = 0;
+                    end
+                    % 再判断一下右边是否可以换道
+                    if round(laneIdxDev) <= 0 || nearJunctionCanNotLC % 超出了左边的界限，无法再向左换道
+                        surroundVehMat(bidx,3) = 999; % 无法换道
+                        surrVehDistMat(bidx,3) = 1; % 给一个小值
+                        surrVehSpdMat(bidx,3) = 0;
+                        surroundVehMat(bidx+1,3) = 999; % 无法换道
+                        surrVehDistMat(bidx+1,3) = 1; % 给一个小值
+                        surrVehSpdMat(bidx+1,3) = 0;
+                    end
+
+                    left_front_veh_dist = dftDist; % 默认距离
+                    left_front_veh_No = 0;
+                    left_front_veh_spd = 0;
+                    right_front_veh_dist = dftDist; % 默认距离
+                    right_front_veh_No = 0;
+                    right_front_veh_spd = 0;
+
+                    nextEdgeID = obj.getNextRouteEdgeID(vNo); % 获取导航路径上下一个边
+
+                    % (2)寻找左前车（同时找相对车的右后车）
+                    if surroundVehMat(bidx,1)<0 % 如果没有被其他流程检查出来过
+                        % 此时能到这里说明左边可以换道
+                        % 首先检查同一个edge内的左边车道的车辆
+                        leftLaneList = find(sameEdgeLogical & ...
+                           laneNos == (laneNo + 1) & opsStates); % 这里左侧车道的所有未停止的车，肯定不包含自身
+
+                        for i = 1:length(leftLaneList) % 对每辆车进行检查
+                            otherVNo = leftLaneList(i);
+                            l_fv_dist = laneDists(otherVNo) - laneDists(vNo);
+                            if l_fv_dist > 0 % 说明这辆车在前面
+                                if l_fv_dist <= left_front_veh_dist
+                                    left_front_veh_dist = l_fv_dist;
+                                    left_front_veh_No = otherVNo;
+                                    left_front_veh_spd = spds(otherVNo);
+                                end
+                            end
+                        end
+
+                        if left_front_veh_No % 如果已经在左边的车道找到了左前车，那么对其来说我就是右后车啦
+                            surroundVehMat(left_front_veh_No*2,3) = vNo;
+                            surrVehDistMat(left_front_veh_No*2,3) = left_front_veh_dist;
+                            surrVehSpdMat(left_front_veh_No*2,3) = spds(vNo);
+                            
+                        % 如果没检查出来，再检查虚拟车
+                        elseif opsState ~= 2 % 如果不在自己路线的最终边上，那么nextEdgeID也不应该为[]
+                            % disp(nextEdgeID); % 如果有问题可以检查一下是否是空的
+                            leftLaneID = [currentEdgeID '_' char('0'+laneNo + 1)];
+                            canReachNextEdge_left = obj.net.canReach_L2E(leftLaneID,nextEdgeID);
+                            if ~canReachNextEdge_left % 如果左车道到达不了下一个edge
+                                left_front_veh_dist = remDist-10; % 比停止线更靠前
+                                left_front_veh_No = 666; % 虚拟车号码
+                                % left_front_veh_spd = 0;
+
+                            elseif nearJunction % 如果上面都不符合，看是否临近下一个路口，如果是，就用偏移，检查投影
+                                % 找到相关车了，开始交互啦------------------------------------------------
+                                 % 如果我是直行车，有最高通行权，那我只需要考虑比较近的车
+                                if ~isempty(sameJunctionList) % 如果存在周车
+                                    for i = 1:length(sameJunctionList) % 对每个筛选出来的周车进行检查
+                                        otherVNo = sameJunctionList(i);
+                                        % 需要对下面vNo的线进行offset
+                                        leftDriveLine = offset2DCurve_dir_mex(obj.vehDriveLine{vNo},3.2,'left'); % 这里车道宽度默认为3.2了
+                                        [isIntersect, ~, v_dist, ov_dist] = findIntersection_mex(leftDriveLine, obj.vehDriveLine{otherVNo});
+                                        if isIntersect && v_dist < left_front_veh_dist % 如果我的轨迹和这辆车的轨迹相交,且比原有左前车更近（或者比默认值更近）
+                                            v_timeHeadWay = v_dist / spds(vNo);
+                                            ov_timeHeadWay = ov_dist / spds(otherVNo);
+                                            if abs(v_timeHeadWay - ov_timeHeadWay) < 2 %如果小于2s的时距，否则互相不交互
+                                                if dir > dirs(otherVNo) % 本车拥有更高通行权,就只考虑闯入本车行驶范围内的低通行权车
+                                                    [~, dev, lineDist, ~] = projPoint2Polyline_mex(leftDriveLine,[xs(otherVNo),ys(otherVNo)]);
+                                                    if dev < 3.5 && lineDist < left_front_veh_dist  % 小于车道
+                                                        left_front_veh_No = otherVNo;
+                                                        left_front_veh_dist = lineDist;
+                                                        left_front_veh_spd = spds(otherVNo);
+                                                    end
+                                                elseif dir == dirs(otherVNo) % 两车通行权相同，用politeess决胜负
+                                                    if obj.vehicles{vNo}.politenss > obj.vehicles{otherVNo}.politenss % 我更礼貌
+                                                        left_front_veh_dist = v_dist;
+                                                        left_front_veh_No = otherVNo; 
+                                                        left_front_veh_spd = spds(otherVNo);
+                                                    end
+                                                else % 本车通行权低，应该让行
+                                                    left_front_veh_dist = v_dist;
+                                                    left_front_veh_No = otherVNo; 
+                                                    left_front_veh_spd = spds(otherVNo);
+                                                end
+                                            end
+                                        end
+                                    end
+                                end %---------------------------------------------------------------------
+                            end
+                        end
+                        surroundVehMat(bidx,1) = left_front_veh_No; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                        surrVehDistMat(bidx,1) = left_front_veh_dist;
+                        if left_front_veh_No
+                            surrVehSpdMat(bidx,1) = left_front_veh_spd;
+                        else
+                            surrVehSpdMat(bidx,1) = states(vNo,obj.var_spdLim);
+                        end
+                    end
+
+                    %#######################################################################################
+                    % (6)寻找右后车
+                    if surroundVehMat(bidx+1,3)<0 % 如果没有被其他流程检查出来过
+                        surroundVehMat(bidx+1,3) = 0; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                        % surrVehDistList_mat(bidx+1,3) = 1;
+                        surrVehSpdMat(bidx+1,3) = 0;
+                    end
+
+                    %#######################################################################################
+                    % (3)寻找右前车（同时找相对车的左后车）
+                    if surroundVehMat(bidx,3)<0 % 如果没有被其他流程检查出来过
+                        % 此时能到这里说明右边可以换道
+                        rightLaneList = find(sameEdgeLogical & ...
+                           laneNos == (laneNo - 1) & opsStates); % 这里右侧车道的所有车未停止的车
+
+                        for i = 1:length(rightLaneList) % 对每辆车进行检查
+                            otherVNo = rightLaneList(i);
+                            r_fv_dist = laneDists(otherVNo) - laneDists(vNo);
+                            if r_fv_dist > 0 % 说明这辆车在前面
+                                if r_fv_dist <= right_front_veh_dist
+                                    right_front_veh_dist = r_fv_dist;
+                                    right_front_veh_No = otherVNo;
+                                    right_front_veh_spd = spds(otherVNo);
+                                end
+                            end
+                        end
+
+                        if right_front_veh_No % 如果已经在右边的车道找到了右前车，那么对其来说我就是左后车啦
+                            surroundVehMat(right_front_veh_No*2,1) = vNo;
+                            surrVehDistMat(right_front_veh_No*2,1) = right_front_veh_dist;
+                            surrVehSpdMat(right_front_veh_No*2,1) = spds(vNo);
+                            
+                        % 如果没检查出来，再检查虚拟车
+                        elseif opsState ~= 2 % 如果不在自己路线的最终边上，那么nextEdgeID也不应该为[]
+                            % disp(nextEdgeID); % 如果有问题可以检查一下是否是空的
+                            rightLaneID = [currentEdgeID '_' char('0'+laneNo - 1)];
+                            canReachNextEdge_right = obj.net.canReach_L2E(rightLaneID,nextEdgeID);
+                            if ~canReachNextEdge_right % 如果右车道到达不了下一个edge
+                                right_front_veh_dist = remDist-10; % 比停止线更靠前
+                                right_front_veh_No = 666; % 虚拟车号码
+                                % right_front_veh_spd = 0;
+
+                            elseif nearJunction % 如果上面都不符合，看是否临近下一个路口，如果是，就用偏移，检查投影
+                                % 找到相关车了，开始交互啦------------------------------------------------
+                                 % 如果我是直行车，有最高通行权，那我只需要考虑比较近的车
+                                if ~isempty(sameJunctionList) % 如果存在周车
+                                    for i = 1:length(sameJunctionList) % 对每个筛选出来的周车进行检查
+                                        otherVNo = sameJunctionList(i);
+                                        % 需要对下面vNo的线进行offset
+                                        rightDriveLine = offset2DCurve_dir_mex(obj.vehDriveLine{vNo},3.2,'right'); % 这里车道宽度默认为3.2了
+                                        [isIntersect, ~, v_dist, ov_dist] = findIntersection_mex(rightDriveLine, obj.vehDriveLine{otherVNo});
+                                        if isIntersect && v_dist < right_front_veh_dist % 如果我的轨迹和这辆车的轨迹相交,且比原有左前车更近（或者比默认值更近）
+                                            v_timeHeadWay = v_dist / spds(vNo);
+                                            ov_timeHeadWay = ov_dist / spds(otherVNo);
+                                            if abs(v_timeHeadWay - ov_timeHeadWay) < 2 %如果小于2s的时距，否则互相不交互
+                                                if dir > dirs(otherVNo) % 本车拥有更高通行权,就只考虑闯入本车行驶范围内的低通行权车
+                                                    [~, dev, lineDist, ~] = projPoint2Polyline_mex(rightDriveLine,[xs(otherVNo),ys(otherVNo)]);
+                                                    if dev < 3.5 && lineDist < right_front_veh_dist  % 小于车道
+                                                        right_front_veh_No = otherVNo;
+                                                        right_front_veh_dist = lineDist;
+                                                        right_front_veh_spd = spds(otherVNo);
+                                                    end
+                                                elseif dir == dirs(otherVNo) % 两车通行权相同，用politeess决胜负
+                                                    if obj.vehicles{vNo}.politenss > obj.vehicles{otherVNo}.politenss % 我更礼貌
+                                                        right_front_veh_dist = v_dist;
+                                                        right_front_veh_No = otherVNo; 
+                                                        right_front_veh_spd = spds(otherVNo);
+                                                    end
+                                                else % 本车通行权低，应该让行
+                                                    right_front_veh_dist = v_dist;
+                                                    right_front_veh_No = otherVNo; 
+                                                    right_front_veh_spd = spds(otherVNo);
+                                                end
+                                            end
+                                        end
+                                    end
+                                end %---------------------------------------------------------------------
+                            end
+                        end
+
+
+                        surroundVehMat(bidx,3) = right_front_veh_No; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                        surrVehDistMat(bidx,3) = right_front_veh_dist;
+                        if right_front_veh_No
+                            surrVehSpdMat(bidx,3) = right_front_veh_spd;
+                        else
+                            surrVehSpdMat(bidx,3) = states(vNo,obj.var_spdLim);
+                        end
+                    end
+
+
+                    %#######################################################################################
+                    % (5)寻找左后车
+                    if surroundVehMat(bidx+1,1)<0 % 如果没有被其他流程检查出来过
+                        surroundVehMat(bidx+1,1) = 0; % 如果检查了就是没有，那就大大方方写0,否则就是有号码
+                        % surrVehDistList_mat(bidx+1,1) = 1;
+                        surrVehSpdMat(bidx+1,1) = 0;
+                    end
+                                        
+                end
+            end
+          
+        end
+
+
+
+
+
+
+        % #############################################################################################################
+        %                                           各属性的一次性全更新
+        % #############################################################################################################
+
+        %--------------------------------------------------------------------------------------------------------------
+        %-------------------------------------------属性：opsState--------------------全部更新--------------------------
+        %-------------------------------------------------------------------------------------------------------------
+        % 获取所有车的opsState用于更新
+        function opsStateList = getAllOpsState(obj)
+            opsStateList = obj.vehState(:,obj.var_opsState);
+            for vNo = 1:obj.vehNum
+                if opsStateList(vNo) > 0 % 只更新没结束的车辆
+                    edgeNo = obj.vehState(vNo,obj.var_edgeNo);
+                    isInFinalEdge = obj.net.frindgeEdgeArray(edgeNo);
+                    routeIdx = obj.vehState(vNo,obj.var_routeIdx);
+                    isInEndEdge = (routeIdx >= obj.vehicles{vNo}.routeNum); % 看下是不是到估计的路线的最终边啦
+                    if ~isInEndEdge
+                        % 如果不是，再看看下一条边是不是在本场景的路网外部
+                        isNextEdgeOutRange = ~obj.net.isInNet_fast(obj.vehicles{vNo}.route{routeIdx+1});
+                    end
+                    if strncmp(obj.laneIDs{vNo},':',1)
+                        opsState = 3;
+                    elseif isInEndEdge || (isInFinalEdge && isNextEdgeOutRange) 
+                        % 2 的含义就是，要么在这辆车自己的结束，要么因为路网裁剪的原因被迫结束
+                        opsState = 2;
+                    else 
+                        opsState = 1;
+                    end
+                    opsStateList(vNo) = opsState;
+
+                end
+            end
+            
+        end
+
+        %--------------------------------------------------------------------------------------------------------------
+        %----------------------------属性：canReachNextEdge--------------------全部更新-------------------------------
+        %-------------------------------------------------------------------------------------------------------------
+        % 判断所有车辆是否可以到达其路线上的下一个edge
+        function canReachNextEdgeList = getAllCanReachNextEdge(obj)
+            canReachNextEdgeList = zeros(obj.vehNum,1); % 全都初始化为不能
+            for vNo = 1:obj.vehNum
+                if obj.vehState(vNo,obj.var_opsState) % 如果还没结束，就计算，否则就不浪费算力啦
+                    % 对每辆车判断是否可以到达下一个边
+                    currentLaneID = obj.laneIDs{vNo};
+                    nextEdgeID = obj.getNextRouteEdgeID(vNo);
+                    if ~isempty(nextEdgeID) % 如果已经没有下一个edge了，就不用管啦，否则继续
+                        canReachNextEdgeList(vNo) = obj.net.canReach_L2E(currentLaneID,nextEdgeID);
+                    end
+                end
+            end
+        end
+
+
+        %--------------------------------------------------------------------------------------------------------------
+        %-------------------------------------------属性：dir--------------------全部更新-------------------------------
+        %-------------------------------------------------------------------------------------------------------------
+        % 查找每一辆车在下一个路口时的意图的语义
+        function dirs = getAllDirs(obj) % 当前正准备进行的方向(也表示了优先级)，-1,0,1,2,3(edge末端停车，调头，左转，右转，直行)
+            dirs = -1*ones(obj.vehNum,1); % 先用-1初始化
+            for vNo = 1:obj.vehNum
+                opsState = obj.vehState(vNo,obj.var_opsState);
+                if opsState % 如果还没结束,就继续判断
+                    routeIdx = obj.vehState(vNo,obj.var_routeIdx);
+                    routeNum = obj.vehicles{vNo}.routeNum;
+                    currentEdgeID = obj.edgeIDs{vNo};
+                    if routeIdx < routeNum % 如果没有后续啦，认为车将在本edge末停车,否则↓%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%可以认真修改的地方
+                        % 如果是在交叉口内，说明一定还有下一个edge
+                        % 在正常边内，并不是要结束了，还有下一个边
+                        nextEdgeID = obj.getNextRouteEdgeID(vNo); % 获取route中的下一个edge
+                        dir = obj.net.getDirE2E(currentEdgeID,nextEdgeID);
+                        if strcmpi(dir,'s')
+                            dirs(vNo) = 3;
+                        elseif strcmpi(dir,'r')
+                            dirs(vNo) = 2;
+                        elseif strcmpi(dir,'l')
+                            dirs(vNo) = 1;
+                        elseif strcmpi(dir,'t')
+                            dirs(vNo) = 0;
+                        end
+                    end
+                end
+            end
+        end
+        %--------------------------------------------------------------------------------------------------------------
+        %-------------------------------------------属性：remDist-----------------------全部更新------------------------
+        %-------------------------------------------------------------------------------------------------------------
+        % 一次性更新所有的remDist，适合初始化时使用
+        function  remDistList = getAllRemDist(obj)
+            remDistList = zeros(obj.vehNum,1);
+            for vNo = 1:obj.vehNum
+                currentLaneID = obj.laneIDs{vNo};
+                remDistList(vNo) = obj.net.e_dict{currentLaneID}.length;
+            end
+            remDistList = remDistList - obj.vehState(:,obj.var_laneDist);
+        end
+
+        %--------------------------------------------------------------------------------------------------------------
+        %------------------------------------------场景状态：vehDriveLine------------------全部更新----------------------
+        %-------------------------------------------------------------------------------------------------------------
+        % 对每辆车，找出每一辆车的当前车道下向前foreseeTime秒匀速行驶距离的车道中心线
+        function vehDriveLine_init = getAllVehicleLines(obj)
+            vehDriveLine_init = cell(obj.vehNum,1);
+            lineLengths = max((obj.vehState(:,obj.var_spd) + 1)*obj.foreseeTime,15); % 保证这条线至少有一定的长度
+            laneDists = obj.vehState(:,obj.var_laneDist);
+            opsStates = obj.vehState(:,obj.var_opsState);
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo) % 如果还没结束，就计算，否则就不浪费算力啦
+                    % 首先是计算需要多长的centerLine
+                    lineLength = lineLengths(vNo);
+                    currentLaneID = obj.laneIDs{vNo};
+                    laneDist = laneDists(vNo);
+                    currentLaneShape = obj.net.getLaneShape(currentLaneID);
+                    if ~obj.vehState(vNo,obj.var_canReachNextEdge) % 如果在当前车道还无法到达下一个edge，就只生成本edge内的
+                        fullLine = currentLaneShape;
+                    else % 如果可以到达，就先提取前面的2个edge
+                        % routeNum = obj.vehicles{vNo}.routeNum;
+                        if strncmp(currentLaneID,':',1) % 如果是在交叉口内部的边
+                            % 那么当前的routeIdx对应的是已经行驶过的边，且一定存在下一个正常边
+                            % 且对于轿车口内的车道来说，可以到达的下一个车道是唯一的
+                            toLaneID = obj.net.lc_from_dict{currentLaneID}{1}.to;
+                            line1 = currentLaneShape;
+                            line2 = obj.net.getLaneShape(toLaneID);
+                        else % 也没有马上结束，那么就是还有下一个边，以及下一个边的中间边
+                            % 需要找到从本车道到下一个edge可能的lane连接，并选取其中最近的lane作为目标lane
+                            line1 = currentLaneShape;
+                            dist_min = inf;
+                            idx = 0;
+                            lc_connections = obj.net.get_lc_from_connections(currentLaneID);
+                            for i = 1:length(lc_connections)
+                                toLaneID_temp = lc_connections{i}.to;
+                                nextEdgeID = obj.getNextRouteEdgeID(vNo);
+                                if strcmp(toLaneID_temp(1:end-2),nextEdgeID) % 需要保证这个连接的下一个edge是route中的下一个edge
+                                    laneShape = obj.net.getLaneShape(toLaneID_temp);
+                                    lanePos = laneShape(1,:);
+                                    dist_xy = norm(lanePos - line1(end,:));
+                                    if dist_xy < dist_min
+                                        idx = i;
+                                    end
+                                end
+                            end
+                            if ~idx
+                                error(['vNo:' num2str(vNo) '无法找到与route中下一个目标edge内lane的连接,currentlaneID=' currentLaneID]);
+                            end
+                            toLaneID = lc_connections{idx}.via;
+                            line2 = obj.net.getLaneShape(toLaneID);
+                        end
+                        % toLaneIDs{vNo} = toLaneID;
+                        fullLine = [line1;line2(2:end,:)];
+                    end
+                    vehDriveLine_init{vNo} = getVehLineInDist_mex(fullLine,laneDist,lineLength);
+                end
+            end
+
+        end
+        
+
+
+
+
+        %  一次性不加判断地获取所有车辆的junctionID,只在初始化时推荐使用一次.
+        function junctionIDs = getAllJunctionIDs(obj)
+            junctionIDs = cell(obj.vehNum,1);
+            for vNo = 1:obj.vehNum
+                edgeID = obj.edgeIDs{vNo};
+                if strncmp(edgeID,':',1) %说明是Junction的内部edge
+                    lastUnderscoreIdx = find(edgeID=='_',1,'last');
+                    junctionIDs{vNo} = edgeID(2:lastUnderscoreIdx-1);
+                else
+                    junctionIDs{vNo} = obj.net.e_dict{edgeID}.to;
+                end
+            end
+        end
+
+        % 一次性不加判断地获取所有车辆的laneID或edgeID,只在初始化时推荐使用一次。
+        function edgeIDs = getAllEdgeIDs(obj)
+            edgeIDs = cell(obj.vehNum,1);
+            for vNo = 1:obj.vehNum
+                edgeIDs{vNo} = obj.getEdgeID(vNo);
+            end
+        end
+        function laneIDs = getAllLaneIDs(obj)
+            laneIDs = cell(obj.vehNum,1);
+            opsStates = obj.opsState_;
+            for vNo = 1:obj.vehNum
+                if opsStates(vNo)
+                    laneIDs{vNo} = obj.getLaneID(vNo);
+                end
+            end
+        end
+    
+
+
+        % 获取车辆当前的laneID
+        function laneID = getLaneID(obj,vNo)
+            maxLaneIdx = round(obj.vehState(vNo,obj.var_maxLaneIdxDev)-0.5);
+            laneIdx = round(obj.vehState(vNo,obj.var_laneIdxDev));
+            if laneIdx > maxLaneIdx
+                laneIdx = maxLaneIdx;
+            elseif laneIdx < 0
+                laneIdx = 0;
+            end
+            laneID = [obj.net.edgeList{obj.vehState(vNo,obj.var_edgeNo)} '_' char('0'+laneIdx)];
+        end
+
+        % 获取车辆当前的edgeID
+        function edgeID = getEdgeID(obj,vNo)
+            edgeID = obj.net.edgeList{obj.vehState(vNo,obj.var_edgeNo)};
+        end
+        
+        function nextEdgeIDs = getAllNextEdgeID(obj)
+            vehNumber = obj.vehNum;
+            nextEdgeIDs = cell(vehNumber,1);
+            opsStates = obj.opsState_;
+            for vNo = 1:vehNumber
+                if opsStates % 如果车辆没结束，就找一下
+                    nextEdgeIDs{vNo} = obj.getNextEdgeID(vNo);
+                end
+            end
+        end
+        
+        function [frontSpaces,backSpaces] = getAllSpace(obj)
+            frontSpaces = obj.surrVehDist(1:2:end,2);
+            backSpaces = obj.surrVehDist(2:2:end,2);
+        end
+
+        % 按照路径，找到下一个edgeID,如果是快要结束了，就是空的[]
+        function nextEdgeID = getNextEdgeID(obj,vNo)
+            nextEdgeID = [];
+            currentEdgeID = obj.edgeIDs{vNo};
+            if strncmp(currentEdgeID,':',1) % 如果是在交叉口内部的edge,就直接找下一个to的edge
+                nextEdgeID = obj.getNextRouteEdgeID(vNo);
+            else % 如果是正常的edge，就需要从所有的connection中判断，找到第一个到这条edge的连接，取via的lane，取其edge
+                opsState = obj.vehState(vNo,obj.var_opsState);
+                if opsState && opsState ~= 2 % 保证了有下一个routeEdge
+                    nextRouteEdgeID = obj.getNextRouteEdgeID(vNo);
+                    connections = obj.net.c_from_dict{currentEdgeID}.connections;
+                    for i = 1:obj.net.c_from_dict{currentEdgeID}.connection_num
+                        if strcmp(connections{i}.to,nextRouteEdgeID)
+                            viaLaneID = connections{i}.via;
+                            nextEdgeID = regexprep(viaLaneID, '_\d+$', '');
+                            break
+                        end
+                    end
+                end
+            end
+
+        end
+
+
+        % 获取route中下一个edge的ID，如果没有下一个edge，就返回[]
+        function edgeID = getNextRouteEdgeID(obj,vNo)
+            routeIdx = obj.vehState(vNo,obj.var_routeIdx);
+            routeNum = obj.vehicles{vNo}.routeNum;
+            if routeIdx >= routeNum
+                edgeID = [];
+            else
+                edgeID = obj.vehicles{vNo}.route{routeIdx+1};
+            end
+        end
+        
+        function entity = getEntity(obj,entityID)
+            entity = obj.net.getEntity(entityID);
+        end
+
+        % 获取当前仿真到的时间
+        function currentTime = getSimTime(obj)
+            currentTime = max((obj.currentStep-1)*obj.timeStep,0);
+        end
+
+        % 保存当前的vehState到vehLogState中去
+        function obj = saveState(obj)
+            obj.vehLogState(obj.currentStep,:,:) = permute(obj.vehState, [2, 1]);
+        end
+        
+        % 根据仿真时间判断是否结束仿真
+        function flag = isEnd(obj) 
+            if obj.getSimTime >= obj.sectionSimTime
+                flag = true;
+            else
+                flag = false;
+            end
+        end
+
+        function obj = simulate(obj)
+            while ~obj.isEnd
+                obj = obj.step;
+            end
+        end
+        
+
+        % 检查一辆车是否已经终止运行
+        function flag = isDone(obj,vehNo)
+            if obj.vehState(vehNo,obj.var_opsState)
+                flag = true;
+            else
+                flag = false;
+            end
+        end
+
+        % #############################################################################################################
+        %                                           车辆属性get函数
+        % #############################################################################################################
+        function laneIdxDevs = get.laneIdxDev_(obj)
+            laneIdxDevs = obj.vehState(:,obj.var_laneIdxDev);
+        end
+        function laneDists = get.laneDist_(obj)
+            laneDists = obj.vehState(:,obj.var_laneDist);
+        end
+        function xs = get.x_(obj)
+            xs = obj.vehState(:,obj.var_x);
+        end
+        function ys = get.y_(obj)
+            ys = obj.vehState(:,obj.var_y);
+        end
+        function spds = get.spd_(obj)
+            spds = obj.vehState(:,obj.var_spd);
+        end
+        function accs = get.acc_(obj)
+            accs = obj.vehState(:,obj.var_acc);
+        end
+        function headings = get.heading_(obj)
+            headings = obj.vehState(:,obj.var_heading);
+        end
+        function edgeNos = get.edgeNo_(obj)
+            edgeNos = obj.vehState(:,obj.var_edgeNo);
+        end
+        function opsStates = get.opsState_(obj)
+            opsStates = obj.vehState(:,obj.var_opsState);
+        end
+        function maxLaneIdxDevs = get.maxLaneIdxDev_(obj)
+            maxLaneIdxDevs = obj.vehState(:,obj.var_maxLaneIdxDev);
+        end
+        function dirs = get.dir_(obj)
+            dirs = obj.vehState(:,obj.var_dir);
+        end
+        function remDists = get.remDist_(obj)
+            remDists = obj.vehState(:,obj.var_remDist);
+        end
+        function routeIdxs = get.routeIdx_(obj)
+            routeIdxs = obj.vehState(:,obj.var_routeIdx);
+        end
+        function canReachNextEdges = get.canReachNextEdge_(obj)
+            canReachNextEdges = obj.vehState(:,obj.var_canReachNextEdge);
+        end
+        function changingLanes = get.changingLane_(obj)
+            changingLanes = obj.vehState(:,obj.var_changingLane);
+        end
+        function targetLaneIdxs = get.targetLaneIdx_(obj)
+            targetLaneIdxs = obj.vehState(:,obj.var_targetLaneIdx);
+        end
+        function spdLims = get.spdLim_(obj)
+            spdLims = obj.vehState(:,obj.var_spdLim);
+        end
+        function nextSpdLims = get.nextSpdLim_(obj)
+            nextSpdLims = obj.vehState(:,obj.var_nextSpdLim);
+        end
+        function devSpds = get.devSpd_(obj)
+            devSpds = obj.vehState(:,obj.var_devSpd);
+        end
+        function frontSpaces = get.frontSpace_(obj)
+            frontSpaces = obj.vehState(:,obj.var_frontSpace);
+        end
+        function backSpaces = get.backSpace_(obj)
+            backSpaces = obj.vehState(:,obj.var_backSpace);
+        end
+        function spdDiffs = get.spdDiff_(obj)
+            spdDiffs = obj.vehState(:,obj.var_spdDiff);
+        end
+        function newobj = clone(obj) 
+            newobj = SimScenario();
+            metaobj = metaclass(obj);
+            props = {metaobj.PropertyList.Name};
+            for j = 1:length(props)
+                theProp = props{j};
+                if ~strcmp(theProp,'var') && ~strcmp(theProp(end),'_')
+                    tmpProp = obj.(theProp);
+                    if (isa(tmpProp,'handle')) % 如果是Handle类对象，调用该类的Clone方法
+                        newobj.(theProp) = tmpProp.clone();
+                    else % 否则直接赋值拷贝
+                        newobj.(theProp) = obj.(theProp);
+                    end
+                end
+            end
+        end
+    end
+
+
+
+end
