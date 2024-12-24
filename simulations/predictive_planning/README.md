@@ -1,0 +1,1 @@
+Here is the vital part regarding predictive decision and planing in cloud plat form, which enables the tank truck to drive more wisely considering long-time history of other vehicles percepted by roadside units and other cooperative Intelligent and Connected Vehicles (ICVs).
