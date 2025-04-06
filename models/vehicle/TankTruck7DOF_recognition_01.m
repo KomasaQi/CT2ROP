@@ -1,0 +1,80 @@
+%% 加载仿真数据库
+% 加载原始TruckSim仿真数据
+load dlc_calibration_out.mat dlc_out
+% 这是一次dlc工况双移线仿真的实例，是一个15s的数据
+state_init_times = dlc_out.output_ref.Time; % TruckSim仿真状态量
+refState_init = dlc_out.output_ref.Data; 
+input_init_times = dlc_out.input.Time; % 用于线性模型的仿真输入量 
+input_init = dlc_out.input.Data;
+% 定义仿真实际的时间尺度与细分
+Ts = 0.05; % 与控制器保持一致
+tspan = [0 15];
+time = (tspan(1):Ts:tspan(2))';
+
+%% 进行数据插值预处理
+numState = size(refState_init,2);
+numInput = size(input_init,2);
+refStates = zeros(length(time),numState); % 初始化状态存储空间
+input0 = zeros(length(time),numInput); % 还没有被处理过的input
+% 逐个状态进行插值
+for i = 1:numState
+    refStates(:,i) = interp1(state_init_times,refState_init(:,i),time);
+end
+for i = 1:numInput
+    input0(:,i) = interp1(input_init_times,input_init(:,i),time);
+end
+
+%% 归一化参考量
+Dataminmax=[min(refStates);max(refStates)];
+DataLen=size(refStates,1);
+refState_uni=(refStates-repmat(Dataminmax(1,:),DataLen,1))./repmat(diff(Dataminmax),DataLen,1);
+
+
+
+
+%% 开始优化过程
+ifoptim=sqrt(1); %决定是否进行优化
+if ifoptim
+    %% 一次性全部识别 
+    %参数 k1 k2 k3 kr1 kr2 k12 c1 c2 hroll1 hroll2 exh
+    optimize_fluid = sqrt(1);
+     % param=[35,50,50, 15,18,45, 35,80, 0.8,1];   paramsLDP=[1.5, 0.13, 0.77, 0.4763, 0.0, 3.5, 0.33];
+    if optimize_fluid
+        description = "1:k1 2:k2 3:k3 4:kr1 5:kr2 6:k12 7:c1 8:c2 9:hroll1 10:hroll2 11:exh 12:h0 13:hp 14:lp 15:m0_per 16:x0 17:d 18:cd";
+        lb = [1   1   1  0.1  3  20   1  1  -0.5  -1.5 -2   -4 -1.5 0.3 0.1 -0.5 -1.5  0.01];%设置参数下限
+        ub = [200 250 550 50  50 250 250 550  2.5  2.5 2    5  3.5 1.2 0.95 0.5 5.5  1.00];%设置参数上限
+        nvar=18;%参数数量设置
+    else
+        description = "1:k1 2:k2 3:k3 4:kr1 5:kr2 6:k12 7:c1 8:c2 9:hroll1 10:hroll2 11:exh";
+        lb = [1   1   1  0.1  3  20   1  1  0.2  -0.5 -2 ];%设置参数下限
+        ub = [400 450 550 50  50 250 120 250  2.5  2.5 2 ];%设置参数上限
+        nvar=11;%参数数量设置
+    end
+    A = [];
+    b = [];
+    Aeq = [];
+    beq = [];
+    nonlcon = [];
+    UseGa=sqrt(0);
+    if(UseGa)
+    options = optimoptions('ga','ConstraintTolerance',1e-6,'PlotFcn', @gaplotbestf,'UseParallel',true,'MaxGenerations',500);
+    [params,fval,exitflag,output] = ga(@(params) fitnessTruck7DOF(params,tspan,Ts,input0,refState_uni,Dataminmax),nvar,A,b,Aeq,beq,lb,ub,[],options);
+    else
+    options = optimoptions('particleswarm','SwarmSize',100,'HybridFcn',@fmincon,'PlotFcn', @pswplotbestf,'UseParallel',true);
+    [params,fval,exitflag,output] = particleswarm(@(params) fitnessTruck7DOF(params,tspan,Ts,input0,refState_uni,Dataminmax),nvar,lb,ub,options);
+    end
+    
+end
+%% 用最优结果仿真一次
+states = simTruck7DOF(tspan,Ts,input0,params);
+figID = 15;
+compareTruckSim_7DOF(time,states,refStates,figID)
+disp(params)
+disp(['最终拟合损失：' num2str(fval)])
+
+% 生成带时间戳的文件名
+timestamp = datestr(now, 'yyyymmdd_HHMMSS');    % 格式化日期时间
+filename = ['ParRecResult_', timestamp, '.mat']; % 拼接文件名
+
+% 保存变量到该文件
+save(filename, 'params','fval','description'); 
